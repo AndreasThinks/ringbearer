@@ -25,6 +25,7 @@ from collections import deque
 from datetime import datetime
 
 from fastapi import APIRouter, File, Form, Header, UploadFile
+from fastapi.responses import JSONResponse
 
 from .. import config, telegram, transcribe
 
@@ -59,12 +60,13 @@ async def webhook(
 ):
     """Take one ring capture off the phone and deliver it.
 
-    Returns: a small JSON body describing what happened, built from the capture
-    row `relay` wrote. Any 2xx satisfies the app, which never reads a
-    successful body — the body is for curl and for a human reading `Recent
-    runs` after a non-2xx. Every outcome short of an unhandled crash is a 200:
-    a payload with nothing in it is a fact to log, not a server error, and
-    there is no retry on the phone for a 5xx to earn.
+    Returns: logged non-delivery reasons that are expected (test, dry run,
+    duplicate, empty input) remain 200. A transcription failure is 503; a
+    Telegram delivery failure is 502. The latter can be ambiguous: Telegram may
+    have accepted a message before the connection failed, so clients must not
+    automatically replay the capture. The phone's current source retries failed
+    uploads with a later recording, not the same payload. A 5xx reports failure
+    honestly but does not imply safe retry or exactly-once delivery.
     """
     data = await audio.read() if audio is not None else b""
     filename = audio.filename if audio is not None else None
@@ -156,4 +158,11 @@ async def webhook(
         body["reason"] = reason
     if row.get("error"):
         body["error"] = row["error"]
+
+    if reason == "transcription failed":
+        body["ok"] = False
+        return JSONResponse(body, status_code=503)
+    if row.get("error") and not row["forwarded"]:
+        body["ok"] = False
+        return JSONResponse(body, status_code=502)
     return body
