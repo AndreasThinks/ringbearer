@@ -119,7 +119,9 @@ state directory too.
 
 There is also an offline test suite covering both routes, the delivery dials,
 and the fail-closed topic path — `.venv/bin/python -m unittest` — no network,
-no Telegram account, no model involved.
+no Telegram account, no model involved. Native voice conversion tests require
+`ffmpeg` and PyAV 18 (`uv pip install --python .venv/bin/python av==18.0.0`
+for an isolated test environment).
 
 ## Phone settings (Pebble app)
 
@@ -169,12 +171,27 @@ Under Index settings → MCP servers:
   button stays disabled until a group is picked).
 - **Also send to webhook: off**, for the reason above.
 
+## Native voice delivery (webhook)
+
+Set `WEBHOOK_DELIVERY_FORMAT=voice` to upload the original recording as a native
+Telegram voice note instead of transcribing and sending text. The webhook must
+include audio; transcript-only payloads are rejected. The bridge converts audio
+to Ogg/Opus with `ffmpeg` (install it on native hosts; the Docker image includes
+it), then sends one voice note with a short contextual caption. Default `text`
+mode is unchanged.
+
+The upload shares a lock with text delivery and Telegram reconnect/shutdown, so
+a client cannot be torn down mid-send. A failed upload after the request begins
+may have been accepted by Telegram; the response marks it unsafe to retry and
+never falls back to text.
+
 ## Transcription
 
 On the webhook route with payload mode "Recording only", the phone sends audio
 and the text is made on this machine by
 [faster-whisper](https://github.com/SYSTRAN/faster-whisper), on CPU, int8. No
-API key, no cloud, no ffmpeg binary. It runs in a single worker thread, one
+API key or cloud service is involved; ffmpeg is only needed for native voice
+delivery. It runs in a single worker thread, one
 capture at a time, so `/healthz` and the MCP route never wait behind a decode —
 and inside the Docker image it is CPU work like everything else in the
 container.
