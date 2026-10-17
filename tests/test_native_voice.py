@@ -11,6 +11,52 @@ from tests.test_webhook import bridge, post
 
 
 class NativeVoiceHelperTests(unittest.IsolatedAsyncioTestCase):
+    async def test_missing_ffmpeg_is_clear_and_cleans_input(self):
+        with TemporaryDirectory() as state, patch.object(config, 'STATE_DIR', Path(state)), patch.object(native_voice.shutil, 'which', return_value=None):
+            with self.assertRaisesRegex(RuntimeError, 'ffmpeg executable not found'):
+                await native_voice.encode_opus(b'audio')
+            self.assertEqual(list((Path(state) / 'tmp').iterdir()), [])
+
+    async def test_invalid_recording_cleans_input(self):
+        with TemporaryDirectory() as state, patch.object(config, 'STATE_DIR', Path(state)):
+            with self.assertRaisesRegex(ValueError, 'Audio conversion failed'):
+                await native_voice.encode_opus(b'not audio')
+            self.assertEqual(list((Path(state) / 'tmp').iterdir()), [])
+
+    async def test_empty_and_oversized_input_never_spawn_converter(self):
+        with patch.object(native_voice.asyncio, 'create_subprocess_exec', AsyncMock()) as spawn:
+            for data in (b'', b'x' * (native_voice.MAX_AUDIO_BYTES + 1)):
+                with self.assertRaises(ValueError):
+                    await native_voice.encode_opus(data)
+            spawn.assert_not_awaited()
+
+    async def test_converter_timeout_kills_process_and_cleans_input(self):
+        proc = SimpleNamespace(returncode=None, communicate=AsyncMock(side_effect=[TimeoutError(), (b'', b'')]))
+        def kill():
+            proc.returncode = -9
+        from unittest.mock import Mock
+        proc.kill = Mock(side_effect=kill)
+        with TemporaryDirectory() as state, patch.object(config, 'STATE_DIR', Path(state)), patch.object(native_voice.shutil, 'which', return_value='/fake/ffmpeg'), patch.object(native_voice.asyncio, 'create_subprocess_exec', AsyncMock(return_value=proc)):
+            with self.assertRaises(TimeoutError):
+                await native_voice.encode_opus(b'audio')
+            proc.kill.assert_called_once()
+            self.assertEqual(list((Path(state) / 'tmp').iterdir()), [])
+
+    async def test_conversion_failure_never_attempts_upload_or_text_fallback(self):
+        client = SimpleNamespace(send_file=AsyncMock())
+        with patch.object(config, 'TELEGRAM_ENABLED', True), patch.object(native_voice.telegram, 'dials_for', return_value=SimpleNamespace(topic_per_capture=False)), patch.object(native_voice, 'encode_opus', AsyncMock(side_effect=ValueError('bad audio'))), patch.object(telegram, 'tg_client', client), patch.object(telegram, 'log_capture'), patch.object(telegram, 'deliver', AsyncMock()) as text:
+            response = await native_voice.relay_voice(b'audio', {})
+            self.assertEqual(response.status_code, 503)
+            self.assertFalse(json.loads(response.body)['outcome_unknown'])
+            client.send_file.assert_not_awaited()
+            text.assert_not_awaited()
+
+    async def test_disabled_delivery_does_not_convert_or_upload(self):
+        with patch.object(config, 'TELEGRAM_ENABLED', False), patch.object(native_voice, 'encode_opus', AsyncMock()) as encode, patch.object(telegram, 'log_capture'):
+            response = await native_voice.relay_voice(b'audio', {})
+            self.assertFalse(json.loads(response.body)['forwarded'])
+            encode.assert_not_awaited()
+
     async def test_real_m4a_conversion_is_ogg_opus(self):
         data = (Path(__file__).parent / 'fixtures' / 'ring_fixture.m4a').read_bytes()
         with TemporaryDirectory() as state:
