@@ -62,11 +62,12 @@ async def webhook(
 
     Returns: logged non-delivery reasons that are expected (test, dry run,
     duplicate, empty input) remain 200. A transcription failure is 503; a
-    Telegram delivery failure is 502. The latter can be ambiguous: Telegram may
-    have accepted a message before the connection failed, so clients must not
-    automatically replay the capture. The phone's current source retries failed
-    uploads with a later recording, not the same payload. A 5xx reports failure
-    honestly but does not imply safe retry or exactly-once delivery.
+    Telegram delivery failure retains HTTP 200 with ok=false and retry_safe=false:
+    Telegram may have accepted the message before the connection failed. Returning
+    a retryable HTTP error could duplicate an action. Clients must inspect the
+    body and must not automatically replay an uncertain delivery. The phone may
+    show this acknowledged-but-failed request as successful because it only checks
+    HTTP status. Durable receipts are needed to improve that safely.
     """
     data = await audio.read() if audio is not None else b""
     filename = audio.filename if audio is not None else None
@@ -164,5 +165,5 @@ async def webhook(
         return JSONResponse(body, status_code=503)
     if row.get("error") and not row["forwarded"]:
         body["ok"] = False
-        return JSONResponse(body, status_code=502)
+        body["retry_safe"] = False
     return body

@@ -169,13 +169,14 @@ class CaptureTests(unittest.TestCase):
         self.assertEqual(written[0]["source"], "webhook")
         self.assertEqual(written[0]["audio_bytes"], 12)
 
-    def test_a_delivery_failure_returns_bad_gateway_and_a_row(self):
+    def test_a_delivery_failure_is_acknowledged_but_marked_unsafe_to_retry(self):
         rows = []
         deliver = AsyncMock(side_effect=RuntimeError("boom"))
         with bridge(rows, deliver=deliver) as b, patch.object(telegram, "request_recheck"):
             response = post(b.client, transcription="hello")
-        self.assertEqual(response.status_code, 502)
+        self.assertEqual(response.status_code, 200)
         self.assertFalse(response.json()["ok"])
+        self.assertFalse(response.json()["retry_safe"])
         self.assertFalse(response.json()["forwarded"])
         self.assertIn("boom", response.json()["error"])
         (row,) = rows
